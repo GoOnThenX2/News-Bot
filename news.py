@@ -38,9 +38,6 @@ def check_spread_reminder():
             print("Spread reminder sent successfully.")
 
 def check_and_alert():
-    # 0. IMMEDIATE TEST ALERT (Verify setup)
-    send_telegram_message("🤖 *TEST ALERT*\n\nYour new repository setup, news.py script, and GitHub Secrets are working perfectly!")
-
     # 1. Run daily spread reminder check
     check_spread_reminder()
 
