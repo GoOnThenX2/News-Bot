@@ -24,24 +24,9 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Error sending message: {e}")
 
-def check_spread_reminder():
-    now_wat = datetime.now(WAT_TZ)
-    # Mon-Fri corresponds to weekday numbers 0 to 4
-    if now_wat.weekday() <= 4:
-        if now_wat.hour == 9 and 45 <= now_wat.minute < 50:
-            msg = (
-                "⚠️ *DAILY SPREAD REMINDER* ⚠️\n\n"
-                "• *Time:* 09:45 AM WAT\n"
-                "• *Action:* Check your market spreads and liquidity before entering trades today!"
-            )
-            send_telegram_message(msg)
-            print("Spread reminder sent successfully.")
-
 def check_and_alert():
-    # 1. Run daily spread reminder check
-    check_spread_reminder()
+    send_telegram_message("🧪 *FORCED TEST:* Fetching all upcoming High-Impact Red Folder news for the group check!")
 
-    # 2. Check Forex Factory Red Folder News
     now_wat = datetime.now(WAT_TZ)
     print(f"Checking Forex Factory calendar at {now_wat.strftime('%Y-%m-%d %H:%M:%S')} WAT...")
     try:
@@ -51,7 +36,6 @@ def check_and_alert():
             return
         
         events = response.json()
-        ALERT_THRESHOLDS = [60, 30, 15, 5]
         alerts_sent = 0
 
         for event in events:
@@ -62,23 +46,20 @@ def check_and_alert():
                 
                 utc_dt = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
                 event_wat = utc_dt.astimezone(WAT_TZ)
-                
-                minutes_left = (event_wat - now_wat).total_seconds() / 60.0
+                time_str = event_wat.strftime("%b %d, %I:%M %p")
 
-                for target_min in ALERT_THRESHOLDS:
-                    if (target_min - 2.5) <= minutes_left <= target_min:
-                        time_str = event_wat.strftime("%I:%M %p")
-                        msg = (
-                            f"🚨 *RED FOLDER ALERT ({target_min} MINS)* 🚨\n\n"
-                            f"• *Currency:* `{event.get('country')}`\n"
-                            f"• *Event:* {event.get('title')}\n"
-                            f"• *Release Time:* {time_str} WAT\n"
-                            f"• *Forecast:* `{event.get('forecast') or 'N/A'}` | *Previous:* `{event.get('previous') or 'N/A'}`"
-                        )
-                        send_telegram_message(msg)
-                        alerts_sent += 1
+                # Force send every high-impact event regardless of time window
+                msg = (
+                    f"🚨 *FORCED RED FOLDER DUMP* 🚨\n\n"
+                    f"• *Currency:* `{event.get('country')}`\n"
+                    f"• *Event:* {event.get('title')}\n"
+                    f"• *Release Time:* {time_str} WAT\n"
+                    f"• *Forecast:* `{event.get('forecast') or 'N/A'}` | *Previous:* `{event.get('previous') or 'N/A'}`"
+                )
+                send_telegram_message(msg)
+                alerts_sent += 1
 
-        print(f"Check complete. High-impact alerts sent: {alerts_sent}")
+        print(f"Forced check complete. Total alerts broadcasted: {alerts_sent}")
     except Exception as e:
         print(f"Error checking calendar: {e}")
 
