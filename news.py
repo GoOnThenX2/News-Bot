@@ -26,9 +26,10 @@ def send_telegram_message(message):
 
 def check_spread_reminder():
     now_wat = datetime.now(WAT_TZ)
-    # Mon-Fri corresponds to weekday numbers 0 to 4
+    # Mon-Fri (0 to 4)
     if now_wat.weekday() <= 4:
-        if now_wat.hour == 9 and 45 <= now_wat.minute < 50:
+        # Widened window: 9:45 AM to 9:59 AM to absorb GitHub scheduling drift
+        if now_wat.hour == 9 and 45 <= now_wat.minute <= 59:
             msg = (
                 "⚠️ *DAILY SPREAD REMINDER* ⚠️\n\n"
                 "• *Time:* 09:45 AM WAT\n"
@@ -51,6 +52,7 @@ def check_and_alert():
             return
         
         events = response.json()
+        # Widened threshold match windows to account for 5-minute cron intervals & delays
         ALERT_THRESHOLDS = [60, 30, 15, 5]
         alerts_sent = 0
 
@@ -66,7 +68,8 @@ def check_and_alert():
                 minutes_left = (event_wat - now_wat).total_seconds() / 60.0
 
                 for target_min in ALERT_THRESHOLDS:
-                    if (target_min - 2.5) <= minutes_left <= target_min:
+                    # Allow a full 5-minute safety window (target_min - 5 to target_min)
+                    if (target_min - 5.0) <= minutes_left <= target_min:
                         time_str = event_wat.strftime("%I:%M %p")
                         msg = (
                             f"🚨 *RED FOLDER ALERT ({target_min} MINS)* 🚨\n\n"
