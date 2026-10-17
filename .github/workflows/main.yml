@@ -8,6 +8,8 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to save alert state history
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,3 +27,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python news.py
+
+      - name: Commit sent alerts state
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update sent alerts state history [skip ci]"
+          file_pattern: sent_alerts.json
