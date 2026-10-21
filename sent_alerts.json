@@ -1,6 +1,7 @@
 {
   "sent_events": [
-    "GBP-CPI y/y-202610210700-15m"
+    "GBP-CPI y/y-202610210700-15m",
+    "NZD-CPI q/q-202610212245-60m"
   ],
   "spread_dates": [
     "2026-10-21"
