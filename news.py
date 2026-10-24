@@ -5,67 +5,71 @@ import requests
 import threading
 from datetime import datetime
 import pytz
-from flask import Flask, jsonify
+from flask import Flask, request, jsonify
 
-# Flask Web Server setup
 app = Flask(__name__)
 
 # ==========================================
 # CONFIGURATION & CREDENTIALS
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 WAT_TZ = pytz.timezone("Africa/Lagos")
 STATE_FILE = "sent_alerts.json"
+SUBSCRIBERS_FILE = "subscribers.json"
 
-def load_state():
-    if os.path.exists(STATE_FILE):
+def load_json_file(filename, default_value):
+    if os.path.exists(filename):
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(filename, "r") as f:
                 return json.load(f)
         except Exception:
             pass
-    return {"sent_events": [], "spread_dates": []}
+    return default_value
 
-def save_state(state):
+def save_json_file(filename, data):
     try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
+        with open(filename, "w") as f:
+            json.dump(data, f, indent=2)
     except Exception as e:
-        print(f"Error saving state file: {e}")
+        print(f"Error saving {filename}: {e}")
 
-def send_telegram_message(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Error: Telegram credentials not found in environment variables.")
+def send_telegram_message(chat_id, message):
+    if not TELEGRAM_BOT_TOKEN:
         return False
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
     try:
         response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
     except Exception as e:
-        print(f"Error sending message: {e}")
+        print(f"Error sending message to {chat_id}: {e}")
         return False
+
+def broadcast_to_all(message):
+    subscribers = load_json_file(SUBSCRIBERS_FILE, [])
+    for chat_id in subscribers:
+        send_telegram_message(chat_id, message)
 
 def check_spread_reminder(state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
     
-    if now_wat.weekday() <= 4 and now_wat.hour == 9 and 45 <= now_wat.minute <= 59:
+    # 21 represents 9 PM in 24-hour format
+    if now_wat.weekday() <= 4 and now_wat.hour == 21 and 45 <= now_wat.minute <= 59:
         if today_str not in state.get("spread_dates", []):
             msg = (
                 "⚠️ *DAILY SPREAD REMINDER* ⚠️\n\n"
-                "• *Time:* 09:45 AM WAT\n"
-                "• *Action:* Check your market spreads and liquidity before entering trades today!"
+                "• *Time:* 09:45 PM WAT\n"
+                "• *Action:* Check your market spreads and liquidity before entering trades tonight!"
             )
-            if send_telegram_message(msg):
-                state.setdefault("spread_dates", []).append(today_str)
-                print("Spread reminder sent successfully.")
+            broadcast_to_all(msg)
+            state.setdefault("spread_dates", []).append(today_str)
+            print("Spread reminder broadcasted.")
 
 def check_and_alert():
-    state = load_state()
+    state = load_json_file(STATE_FILE, {"sent_events": [], "spread_dates": []})
     check_spread_reminder(state)
 
     now_wat = datetime.now(WAT_TZ)
@@ -103,14 +107,14 @@ def check_and_alert():
                                 f"• *Release Time:* {time_str} WAT\n"
                                 f"• *Forecast:* `{event.get('forecast') or 'N/A'}` | *Previous:* `{event.get('previous') or 'N/A'}`"
                             )
-                            if send_telegram_message(msg):
-                                state.setdefault("sent_events", []).append(unique_key)
+                            broadcast_to_all(msg)
+                            state.setdefault("sent_events", []).append(unique_key)
 
-        save_state(state)
+        save_json_file(STATE_FILE, state)
     except Exception as e:
         print(f"Error checking calendar: {e}")
 
-# Continuous Background Loop (Runs every 60 seconds)
+# Continuous Background Loop
 def start_bot_loop():
     while True:
         try:
@@ -119,12 +123,35 @@ def start_bot_loop():
             print(f"Loop error: {e}")
         time.sleep(60)
 
-# Web Server Route for Uptime pings
+# Web Routes
 @app.route('/')
 def home():
     return jsonify({"status": "running", "bot": "Forex News Alert Bot"})
 
-# Start background thread
+# Webhook endpoint for Telegram to send user interactions (/start)
+@app.route('/telegram-webhook', methods=['POST'])
+def telegram_webhook():
+    data = request.get_json()
+    if data and "message" in data:
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "")
+
+        if text.startswith("/start"):
+            subscribers = load_json_file(SUBSCRIBERS_FILE, [])
+            if chat_id not in subscribers:
+                subscribers.append(chat_id)
+                save_json_file(SUBSCRIBERS_FILE, subscribers)
+            
+            welcome_msg = (
+                "🤖 *Welcome to the Forex News Alert Bot!* 🤖\n\n"
+                "You are now successfully subscribed to receive high-impact Red Folder news and daily spread reminders directly in your private chat."
+            )
+            send_telegram_message(chat_id, welcome_msg)
+
+    return jsonify({"status": "ok"})
+
+# Start background thread for checking news
 threading.Thread(target=start_bot_loop, daemon=True).start()
 
 if __name__ == "__main__":
