@@ -1,45 +1,48 @@
 import os
 import json
 import time
-import requests
 import threading
 from datetime import datetime
-import pytz
+from zoneinfo import ZoneInfo
+import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# ==========================================
-# CONFIGURATION & CREDENTIALS
-# ==========================================
+# Configuration
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-WAT_TZ = pytz.timezone("Africa/Lagos")
-STATE_FILE = "sent_alerts.json"
-SUBSCRIBERS_FILE = "subscribers.json"
+WAT_TZ = ZoneInfo("Africa/Lagos")
 
-def load_json_file(filename, default_value):
-    if os.path.exists(filename):
+SUBSCRIBERS_FILE = "subscribers.json"
+STATE_FILE = "state.json"
+
+def load_json_file(filepath, default_value):
+    if os.path.exists(filepath):
         try:
-            with open(filename, "r") as f:
+            with open(filepath, "r") as f:
                 return json.load(f)
         except Exception:
-            pass
+            return default_value
     return default_value
 
-def save_json_file(filename, data):
+def save_json_file(filepath, data):
     try:
-        with open(filename, "w") as f:
-            json.dump(data, f, indent=2)
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=4)
     except Exception as e:
-        print(f"Error saving {filename}: {e}")
+        print(f"Error saving {filepath}: {e}")
 
-def send_telegram_message(chat_id, message):
+def send_telegram_message(chat_id, text):
     if not TELEGRAM_BOT_TOKEN:
+        print("Error: TELEGRAM_BOT_TOKEN is not set.")
         return False
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
     try:
         response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
@@ -47,29 +50,107 @@ def send_telegram_message(chat_id, message):
         print(f"Error sending message to {chat_id}: {e}")
         return False
 
-def broadcast_to_all(message):
+def broadcast_to_all(text):
     subscribers = load_json_file(SUBSCRIBERS_FILE, [])
     for chat_id in subscribers:
-        send_telegram_message(chat_id, message)
+        send_telegram_message(chat_id, text)
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot is running 24/7!", 200
+
+@app.route("/telegram-webhook", methods=["POST"])
+def telegram_webhook():
+    data = request.get_json()
+    if not data:
+        return jsonify({"status": "ignored"}), 200
+
+    message = data.get("message") or data.get("edited_message")
+    if message:
+        chat = message.get("chat", {})
+        chat_id = chat.get("id")
+        text = message.get("text", "").strip()
+
+        if chat_id and text.startswith("/start"):
+            subscribers = load_json_file(SUBSCRIBERS_FILE, [])
+            if chat_id not in subscribers:
+                subscribers.append(chat_id)
+                save_json_file(SUBSCRIBERS_FILE, subscribers)
+            
+            welcome_msg = (
+                "🟢 *Bot Status: ONLINE & ACTIVE* 🟢\n\n"
+                "Welcome! The Forex News Alert Bot is up and running 24/7.\n\n"
+                "You are now subscribed to receive:\n"
+                "• High-impact Red Folder alerts (60, 30, 15, & 5 mins before release)\n"
+                "• Weekly Red Folder schedule digest every Sunday\n"
+                "• Daily spread reminders at 09:45 PM WAT"
+            )
+            send_telegram_message(chat_id, welcome_msg)
+
+    return jsonify({"status": "ok"}), 200
 
 def check_spread_reminder(state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
-    
-    # 21 represents 9 PM in 24-hour format
-    if now_wat.weekday() <= 4 and now_wat.hour == 21 and 45 <= now_wat.minute <= 59:
-        if today_str not in state.get("spread_dates", []):
+
+    # Check for 09:45 PM WAT (21:45)
+    if now_wat.hour == 21 and now_wat.minute == 45:
+        spread_dates = state.get("spread_dates", [])
+        if today_str not in spread_dates:
             msg = (
-                "⚠️ *DAILY SPREAD REMINDER* ⚠️\n\n"
-                "• *Time:* 09:45 PM WAT\n"
-                "• *Action:* Check your market spreads and liquidity before entering trades tonight!"
+                "⏰ *DAILY SPREAD REMINDER* ⏰\n\n"
+                "It's 09:45 PM WAT. Remember to check your broker spreads and liquidity before entering late sessions or holding positions overnight!"
             )
             broadcast_to_all(msg)
-            state.setdefault("spread_dates", []).append(today_str)
-            print("Spread reminder broadcasted.")
+            spread_dates.append(today_str)
+            state["spread_dates"] = spread_dates
+            save_json_file(STATE_FILE, state)
+
+def check_sunday_weekly_digest(events, state):
+    now_wat = datetime.now(WAT_TZ)
+    today_str = now_wat.strftime("%Y-%m-%d")
+
+    # Sunday = weekday() index 6 | 13:00 to 13:14 WAT window
+    if now_wat.weekday() == 6 and now_wat.hour == 13 and 0 <= now_wat.minute <= 14:
+        sunday_digests = state.get("sunday_digests", [])
+        if today_str not in sunday_digests:
+            high_impact_events = []
+
+            for event in events:
+                if event.get("impact") == "High":
+                    event_iso = event.get("date")
+                    title = event.get("title")
+                    country = event.get("country")
+                    if not event_iso or not title:
+                        continue
+                    
+                    try:
+                        utc_dt = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
+                        event_wat = utc_dt.astimezone(WAT_TZ)
+                        
+                        day_str = event_wat.strftime("%a, %b %d")
+                        time_str = event_wat.strftime("%I:%M %p")
+                        high_impact_events.append(f"• *{day_str} @ {time_str} WAT* | `{country}` - {title}")
+                    except Exception:
+                        continue
+
+            if high_impact_events:
+                digest_msg = (
+                    "📅 *WEEKLY RED FOLDER SCHEDULE* 📅\n\n"
+                    "Here are the high-impact economic events scheduled for this week:\n\n"
+                    + "\n".join(high_impact_events)
+                )
+            else:
+                digest_msg = "📅 *WEEKLY RED FOLDER SCHEDULE* 📅\n\nNo high-impact Red Folder events scheduled for this week."
+
+            broadcast_to_all(digest_msg)
+            sunday_digests.append(today_str)
+            state["sunday_digests"] = sunday_digests
+            save_json_file(STATE_FILE, state)
+            print("Sunday weekly digest broadcasted.")
 
 def check_and_alert():
-    state = load_json_file(STATE_FILE, {"sent_events": [], "spread_dates": []})
+    state = load_json_file(STATE_FILE, {"sent_events": [], "spread_dates": [], "sunday_digests": []})
     check_spread_reminder(state)
 
     now_wat = datetime.now(WAT_TZ)
@@ -79,7 +160,10 @@ def check_and_alert():
             return
         
         events = response.json()
+        check_sunday_weekly_digest(events, state)
+
         ALERT_THRESHOLDS = [60, 30, 15, 5]
+        sent_events = state.get("sent_events", [])
 
         for event in events:
             if event.get("impact") == "High":
@@ -89,8 +173,11 @@ def check_and_alert():
                 if not event_iso or not title:
                     continue
                 
-                utc_dt = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
-                event_wat = utc_dt.astimezone(WAT_TZ)
+                try:
+                    utc_dt = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
+                    event_wat = utc_dt.astimezone(WAT_TZ)
+                except Exception:
+                    continue
                 
                 minutes_left = (event_wat - now_wat).total_seconds() / 60.0
 
@@ -98,7 +185,7 @@ def check_and_alert():
                     unique_key = f"{country}-{title}-{event_wat.strftime('%Y%m%d%H%M')}-{target_min}m"
                     
                     if (target_min - 5.0) <= minutes_left <= target_min:
-                        if unique_key not in state.get("sent_events", []):
+                        if unique_key not in sent_events:
                             time_str = event_wat.strftime("%I:%M %p")
                             msg = (
                                 f"🚨 *RED FOLDER ALERT ({target_min} MINS)* 🚨\n\n"
@@ -108,52 +195,21 @@ def check_and_alert():
                                 f"• *Forecast:* `{event.get('forecast') or 'N/A'}` | *Previous:* `{event.get('previous') or 'N/A'}`"
                             )
                             broadcast_to_all(msg)
-                            state.setdefault("sent_events", []).append(unique_key)
+                            sent_events.append(unique_key)
 
+        state["sent_events"] = sent_events
         save_json_file(STATE_FILE, state)
     except Exception as e:
         print(f"Error checking calendar: {e}")
 
-# Continuous Background Loop
-def start_bot_loop():
+def background_polling_loop():
     while True:
-        try:
-            check_and_alert()
-        except Exception as e:
-            print(f"Loop error: {e}")
+        check_and_alert()
         time.sleep(60)
 
-# Web Routes
-@app.route('/')
-def home():
-    return jsonify({"status": "running", "bot": "Forex News Alert Bot"})
-
-# Webhook endpoint for Telegram to send user interactions (/start)
-@app.route('/telegram-webhook', methods=['POST'])
-def telegram_webhook():
-    data = request.get_json()
-    if data and "message" in data:
-        message = data["message"]
-        chat_id = message["chat"]["id"]
-        text = message.get("text", "")
-
-        if text.startswith("/start"):
-            subscribers = load_json_file(SUBSCRIBERS_FILE, [])
-            if chat_id not in subscribers:
-                subscribers.append(chat_id)
-                save_json_file(SUBSCRIBERS_FILE, subscribers)
-            
-            welcome_msg = (
-                "🤖 *Welcome to the Forex News Alert Bot!* 🤖\n\n"
-                "You are now successfully subscribed to receive high-impact Red Folder news and daily spread reminders directly in your private chat."
-            )
-            send_telegram_message(chat_id, welcome_msg)
-
-    return jsonify({"status": "ok"})
-
-# Start background thread for checking news
-threading.Thread(target=start_bot_loop, daemon=True).start()
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    t = threading.Thread(target=background_polling_loop, daemon=True)
+    t.start()
+    
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
