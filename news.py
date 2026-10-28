@@ -2,7 +2,8 @@ import os
 import json
 import time
 import threading
-from datetime import datetime
+import traceback
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, request, jsonify
@@ -23,7 +24,8 @@ def load_json_file(filepath, default_value):
         try:
             with open(filepath, "r") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            print(f"Error reading {filepath}: {e}")
             return default_value
     return default_value
 
@@ -54,7 +56,7 @@ def send_telegram_message(chat_id, text):
 def broadcast_to_all(text):
     subscribers = load_json_file(SUBSCRIBERS_FILE, [])
     
-    # Ensure ADMIN_CHAT_ID is always included if set
+    # Ensure ADMIN_CHAT_ID is always included
     target_chats = set(subscribers)
     if ADMIN_CHAT_ID:
         try:
@@ -92,7 +94,7 @@ def telegram_webhook():
                 "Welcome! The Forex News Alert Bot is up and running 24/7.\n\n"
                 "You are now subscribed to receive:\n"
                 "• High-impact Red Folder alerts (60, 30, 15, & 5 mins before release)\n"
-                "• Weekly Red Folder schedule digest every Sunday\n"
+                "• Weekly Red Folder schedule digest every Sunday at 1:00 PM WAT\n"
                 "• Daily spread reminders at 09:45 PM WAT"
             )
             send_telegram_message(chat_id, welcome_msg)
@@ -103,8 +105,8 @@ def check_spread_reminder(state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
 
-    # Check for 09:45 PM WAT (21:45)
-    if now_wat.hour == 21 and now_wat.minute == 45:
+    # Trigger at 09:45 PM WAT (21:45)
+    if now_wat.hour == 21 and 45 <= now_wat.minute <= 50:
         spread_dates = state.get("spread_dates", [])
         if today_str not in spread_dates:
             msg = (
@@ -113,14 +115,17 @@ def check_spread_reminder(state):
             )
             broadcast_to_all(msg)
             spread_dates.append(today_str)
-            state["spread_dates"] = spread_dates
+            
+            # Prune old spread dates older than 30 days
+            cutoff = (now_wat - timedelta(days=30)).strftime("%Y-%m-%d")
+            state["spread_dates"] = [d for d in spread_dates if d >= cutoff]
             save_json_file(STATE_FILE, state)
 
 def check_sunday_weekly_digest(events, state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
 
-    # Sunday = weekday() index 6 | 13:00 to 13:14 WAT window
+    # Sunday = weekday index 6 | 13:00 to 13:14 WAT window
     if now_wat.weekday() == 6 and now_wat.hour == 13 and 0 <= now_wat.minute <= 14:
         sunday_digests = state.get("sunday_digests", [])
         if today_str not in sunday_digests:
@@ -155,7 +160,9 @@ def check_sunday_weekly_digest(events, state):
 
             broadcast_to_all(digest_msg)
             sunday_digests.append(today_str)
-            state["sunday_digests"] = sunday_digests
+            
+            # Keep only the last 10 Sunday digest records
+            state["sunday_digests"] = sunday_digests[-10:]
             save_json_file(STATE_FILE, state)
             print("Sunday weekly digest broadcasted.")
 
@@ -173,7 +180,7 @@ def check_and_alert():
         check_sunday_weekly_digest(events, state)
 
         ALERT_THRESHOLDS = [60, 30, 15, 5]
-        sent_events = state.get("sent_events", [])
+        sent_events = set(state.get("sent_events", []))
 
         for event in events:
             if event.get("impact") == "High":
@@ -205,16 +212,21 @@ def check_and_alert():
                                 f"• *Forecast:* `{event.get('forecast') or 'N/A'}` | *Previous:* `{event.get('previous') or 'N/A'}`"
                             )
                             broadcast_to_all(msg)
-                            sent_events.append(unique_key)
+                            sent_events.add(unique_key)
 
-        state["sent_events"] = sent_events
+        # Cap sent_events to the latest 500 records to prevent memory leak
+        state["sent_events"] = list(sent_events)[-500:]
         save_json_file(STATE_FILE, state)
     except Exception as e:
         print(f"Error checking calendar: {e}")
 
 def background_polling_loop():
     while True:
-        check_and_alert()
+        try:
+            check_and_alert()
+        except Exception as e:
+            print(f"Unhandled loop error: {e}")
+            traceback.print_exc()
         time.sleep(60)
 
 if __name__ == "__main__":
