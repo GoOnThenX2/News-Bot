@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 # Configuration
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # Persistent backup chat ID
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 WAT_TZ = ZoneInfo("Africa/Lagos")
 
@@ -55,8 +55,6 @@ def send_telegram_message(chat_id, text):
 
 def broadcast_to_all(text):
     subscribers = load_json_file(SUBSCRIBERS_FILE, [])
-    
-    # Ensure ADMIN_CHAT_ID is always included
     target_chats = set(subscribers)
     if ADMIN_CHAT_ID:
         try:
@@ -105,18 +103,17 @@ def check_spread_reminder(state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
 
-    # Trigger at 09:45 PM WAT (21:45)
-    if now_wat.hour == 21 and 45 <= now_wat.minute <= 50:
+    # Secure 9:45 PM trigger window (allows up to 21:55 to catch delayed loops)
+    if now_wat.hour == 21 and 45 <= now_wat.minute <= 55:
         spread_dates = state.get("spread_dates", [])
         if today_str not in spread_dates:
+            print(f"Triggering daily spread reminder for {today_str}")
             msg = (
                 "⏰ *DAILY SPREAD REMINDER* ⏰\n\n"
                 "It's 09:45 PM WAT. Remember to check your broker spreads and liquidity before entering late sessions or holding positions overnight!"
             )
             broadcast_to_all(msg)
             spread_dates.append(today_str)
-            
-            # Prune old spread dates older than 30 days
             cutoff = (now_wat - timedelta(days=30)).strftime("%Y-%m-%d")
             state["spread_dates"] = [d for d in spread_dates if d >= cutoff]
             save_json_file(STATE_FILE, state)
@@ -125,10 +122,11 @@ def check_sunday_weekly_digest(events, state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
 
-    # Sunday = weekday index 6 | 13:00 to 13:14 WAT window
-    if now_wat.weekday() == 6 and now_wat.hour == 13 and 0 <= now_wat.minute <= 14:
+    # Sunday digest window (expanded to 30 mins to ensure no sleep-cycle misses)
+    if now_wat.weekday() == 6 and now_wat.hour == 13 and 0 <= now_wat.minute <= 30:
         sunday_digests = state.get("sunday_digests", [])
         if today_str not in sunday_digests:
+            print(f"Triggering Sunday weekly digest for {today_str}")
             high_impact_events = []
 
             for event in events:
@@ -140,13 +138,13 @@ def check_sunday_weekly_digest(events, state):
                         continue
                     
                     try:
-                        utc_dt = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
-                        event_wat = utc_dt.astimezone(WAT_TZ)
-                        
+                        dt = datetime.fromisoformat(event_iso)
+                        event_wat = dt.astimezone(WAT_TZ)
                         day_str = event_wat.strftime("%a, %b %d")
                         time_str = event_wat.strftime("%I:%M %p")
                         high_impact_events.append(f"• *{day_str} @ {time_str} WAT* | `{country}` - {title}")
-                    except Exception:
+                    except Exception as ex:
+                        print(f"Error parsing event date {event_iso}: {ex}")
                         continue
 
             if high_impact_events:
@@ -160,11 +158,8 @@ def check_sunday_weekly_digest(events, state):
 
             broadcast_to_all(digest_msg)
             sunday_digests.append(today_str)
-            
-            # Keep only the last 10 Sunday digest records
             state["sunday_digests"] = sunday_digests[-10:]
             save_json_file(STATE_FILE, state)
-            print("Sunday weekly digest broadcasted.")
 
 def check_and_alert():
     state = load_json_file(STATE_FILE, {"sent_events": [], "spread_dates": [], "sunday_digests": []})
@@ -174,6 +169,7 @@ def check_and_alert():
     try:
         response = requests.get(FF_CALENDAR_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if response.status_code != 200:
+            print(f"Failed to fetch calendar feed, status code: {response.status_code}")
             return
         
         events = response.json()
@@ -191,9 +187,10 @@ def check_and_alert():
                     continue
                 
                 try:
-                    utc_dt = datetime.fromisoformat(event_iso.replace("Z", "+00:00"))
-                    event_wat = utc_dt.astimezone(WAT_TZ)
-                except Exception:
+                    dt = datetime.fromisoformat(event_iso)
+                    event_wat = dt.astimezone(WAT_TZ)
+                except Exception as ex:
+                    print(f"Error parsing high-impact event date '{event_iso}': {ex}")
                     continue
                 
                 minutes_left = (event_wat - now_wat).total_seconds() / 60.0
@@ -201,7 +198,9 @@ def check_and_alert():
                 for target_min in ALERT_THRESHOLDS:
                     unique_key = f"{country}-{title}-{event_wat.strftime('%Y%m%d%H%M')}-{target_min}m"
                     
-                    if (target_min - 5.0) <= minutes_left <= target_min:
+                    # Expanded threshold window (-2.0 to +1.0 min) to guarantee 
+                    # no alert is skipped even if the 60-second loop ticks slightly off.
+                    if (target_min - 2.0) <= minutes_left <= (target_min + 1.0):
                         if unique_key not in sent_events:
                             time_str = event_wat.strftime("%I:%M %p")
                             msg = (
@@ -211,23 +210,25 @@ def check_and_alert():
                                 f"• *Release Time:* {time_str} WAT\n"
                                 f"• *Forecast:* `{event.get('forecast') or 'N/A'}` | *Previous:* `{event.get('previous') or 'N/A'}`"
                             )
+                            print(f"Sending alert for {country} - {title} ({target_min} mins left)")
                             broadcast_to_all(msg)
                             sent_events.add(unique_key)
 
-        # Cap sent_events to the latest 500 records to prevent memory leak
         state["sent_events"] = list(sent_events)[-500:]
         save_json_file(STATE_FILE, state)
     except Exception as e:
-        print(f"Error checking calendar: {e}")
+        print(f"Error in check_and_alert: {e}")
+        traceback.print_exc()
 
 def background_polling_loop():
+    print("Background polling loop started safely.")
     while True:
         try:
             check_and_alert()
         except Exception as e:
             print(f"Unhandled loop error: {e}")
             traceback.print_exc()
-        time.sleep(60)
+        time.sleep(30)  # Polling every 30 seconds for maximum timing precision
 
 if __name__ == "__main__":
     t = threading.Thread(target=background_polling_loop, daemon=True)
