@@ -11,6 +11,7 @@ app = Flask(__name__)
 
 # Configuration
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # Persistent backup chat ID
 FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 WAT_TZ = ZoneInfo("Africa/Lagos")
 
@@ -52,7 +53,16 @@ def send_telegram_message(chat_id, text):
 
 def broadcast_to_all(text):
     subscribers = load_json_file(SUBSCRIBERS_FILE, [])
-    for chat_id in subscribers:
+    
+    # Ensure ADMIN_CHAT_ID is always included if set
+    target_chats = set(subscribers)
+    if ADMIN_CHAT_ID:
+        try:
+            target_chats.add(int(ADMIN_CHAT_ID))
+        except ValueError:
+            target_chats.add(ADMIN_CHAT_ID)
+
+    for chat_id in target_chats:
         send_telegram_message(chat_id, text)
 
 @app.route("/", methods=["GET"])
