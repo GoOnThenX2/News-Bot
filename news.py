@@ -93,7 +93,7 @@ def telegram_webhook():
                 "You are now subscribed to receive:\n"
                 "• High-impact Red Folder alerts (60, 30, 15, & 5 mins before release)\n"
                 "• Weekly Red Folder schedule digest every Sunday at 1:00 PM WAT\n"
-                "• Daily spread reminders at 09:45 PM WAT"
+                "• Daily spread reminders (Mon-Fri) at 09:45 PM WAT"
             )
             send_telegram_message(chat_id, welcome_msg)
 
@@ -103,14 +103,14 @@ def check_spread_reminder(state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
 
-    # Secure 9:45 PM trigger window (allows up to 21:55 to catch delayed loops)
-    if now_wat.hour == 21 and 45 <= now_wat.minute <= 55:
+    # Only run Monday to Friday (weekday < 5) between 9:45 PM and 9:55 PM WAT
+    if now_wat.weekday() < 5 and now_wat.hour == 21 and 45 <= now_wat.minute <= 55:
         spread_dates = state.get("spread_dates", [])
         if today_str not in spread_dates:
             print(f"Triggering daily spread reminder for {today_str}")
             msg = (
                 "⏰ *DAILY SPREAD REMINDER* ⏰\n\n"
-                "It's 09:45 PM WAT. Remember to remove your Stop Loss (SL)!"
+                "For Spread: Comot Your SL oo!!"
             )
             broadcast_to_all(msg)
             spread_dates.append(today_str)
@@ -228,7 +228,6 @@ def background_polling_loop():
         time.sleep(30)
 
 if __name__ == "__main__":
-    t = threading.Thread(target=background_polling_log=background_polling_loop, daemon=True) # wait, let's keep target=background_polling_loop
     t = threading.Thread(target=background_polling_loop, daemon=True)
     t.start()
     
