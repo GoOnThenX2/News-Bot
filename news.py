@@ -110,7 +110,7 @@ def check_spread_reminder(state):
             print(f"Triggering daily spread reminder for {today_str}")
             msg = (
                 "⏰ *DAILY SPREAD REMINDER* ⏰\n\n"
-                "It's 09:45 PM WAT. Remember to check your broker spreads and liquidity before entering late sessions or holding positions overnight!"
+                "It's 09:45 PM WAT. Remember to remove your Stop Loss (SL)!"
             )
             broadcast_to_all(msg)
             spread_dates.append(today_str)
@@ -122,7 +122,6 @@ def check_sunday_weekly_digest(events, state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
 
-    # Sunday digest window (expanded to 30 mins to ensure no sleep-cycle misses)
     if now_wat.weekday() == 6 and now_wat.hour == 13 and 0 <= now_wat.minute <= 30:
         sunday_digests = state.get("sunday_digests", [])
         if today_str not in sunday_digests:
@@ -132,9 +131,9 @@ def check_sunday_weekly_digest(events, state):
             for event in events:
                 if event.get("impact") == "High":
                     event_iso = event.get("date")
-                    title = event.get("title")
+                    title = event.get("title") or event.get("name") or event.get("event") or "High Impact News"
                     country = event.get("country")
-                    if not event_iso or not title:
+                    if not event_iso:
                         continue
                     
                     try:
@@ -181,9 +180,9 @@ def check_and_alert():
         for event in events:
             if event.get("impact") == "High":
                 event_iso = event.get("date")
-                title = event.get("title")
-                country = event.get("country")
-                if not event_iso or not title:
+                title = event.get("title") or event.get("name") or event.get("event") or "High Impact News"
+                country = event.get("country", "USD")
+                if not event_iso:
                     continue
                 
                 try:
@@ -198,8 +197,6 @@ def check_and_alert():
                 for target_min in ALERT_THRESHOLDS:
                     unique_key = f"{country}-{title}-{event_wat.strftime('%Y%m%d%H%M')}-{target_min}m"
                     
-                    # Expanded threshold window (-2.0 to +1.0 min) to guarantee 
-                    # no alert is skipped even if the 60-second loop ticks slightly off.
                     if (target_min - 2.0) <= minutes_left <= (target_min + 1.0):
                         if unique_key not in sent_events:
                             time_str = event_wat.strftime("%I:%M %p")
@@ -228,9 +225,10 @@ def background_polling_loop():
         except Exception as e:
             print(f"Unhandled loop error: {e}")
             traceback.print_exc()
-        time.sleep(30)  # Polling every 30 seconds for maximum timing precision
+        time.sleep(30)
 
 if __name__ == "__main__":
+    t = threading.Thread(target=background_polling_log=background_polling_loop, daemon=True) # wait, let's keep target=background_polling_loop
     t = threading.Thread(target=background_polling_loop, daemon=True)
     t.start()
     
