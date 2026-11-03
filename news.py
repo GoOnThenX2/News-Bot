@@ -93,7 +93,7 @@ def telegram_webhook():
                 "You are now subscribed to receive:\n"
                 "• High-impact Red Folder alerts (60, 30, 15, & 5 mins before release)\n"
                 "• Weekly Red Folder schedule digest every Sunday at 1:00 PM WAT\n"
-                "• Daily spread reminders (Mon-Fri) at 09:45 PM WAT"
+                "• Daily spread reminders (Mon-Fri) at 10:45 PM WAT"
             )
             send_telegram_message(chat_id, welcome_msg)
 
@@ -103,8 +103,8 @@ def check_spread_reminder(state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
 
-    # Only run Monday to Friday (weekday < 5) between 9:45 PM and 9:55 PM WAT
-    if now_wat.weekday() < 5 and now_wat.hour == 21 and 45 <= now_wat.minute <= 55:
+    # Only run Monday to Friday (weekday < 5) between 10:45 PM and 10:55 PM WAT (22:45 - 22:55)
+    if now_wat.weekday() < 5 and now_wat.hour == 22 and 45 <= now_wat.minute <= 55:
         spread_dates = state.get("spread_dates", [])
         if today_str not in spread_dates:
             print(f"Triggering daily spread reminder for {today_str}")
