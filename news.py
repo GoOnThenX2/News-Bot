@@ -197,7 +197,8 @@ def check_and_alert():
                 for target_min in ALERT_THRESHOLDS:
                     unique_key = f"{country}-{title}-{event_wat.strftime('%Y%m%d%H%M')}-{target_min}m"
                     
-                    if (target_min - 2.0) <= minutes_left <= (target_min + 1.0):
+                    # Window adjusted to capture precisely within a 1.5 minute range of each threshold
+                    if (target_min - 1.0) <= minutes_left <= (target_min + 0.5):
                         if unique_key not in sent_events:
                             time_str = event_wat.strftime("%I:%M %p")
                             msg = (
