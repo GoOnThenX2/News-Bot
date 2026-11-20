@@ -24,7 +24,7 @@ SUBSCRIBERS_FILE = "subscribers.json"
 STATE_FILE = "state.json"
 CACHED_EVENTS_FILE = "cached_events.json"
 
-# Cache & rate-limit backoff settings
+# In-memory cache & rate-limit backoff settings
 CALENDAR_CACHE = {
     "events": [],
     "last_fetched_at": None,
