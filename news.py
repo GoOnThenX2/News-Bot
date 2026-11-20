@@ -13,11 +13,27 @@ app = Flask(__name__)
 # Configuration
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
-FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+FF_CALENDAR_URL = os.environ.get(
+    "FF_CALENDAR_URL",
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+).strip()
+FALLBACK_CALENDAR_URL = os.environ.get("FALLBACK_CALENDAR_URL", "").strip()
 WAT_TZ = ZoneInfo("Africa/Lagos")
 
 SUBSCRIBERS_FILE = "subscribers.json"
 STATE_FILE = "state.json"
+CACHED_EVENTS_FILE = "cached_events.json"
+
+# Cache & rate-limit backoff settings
+CALENDAR_CACHE = {
+    "events": [],
+    "last_fetched_at": None,
+    "next_allowed_fetch_at": 0.0,
+}
+CACHE_TTL_SECONDS = 1800          # Refresh every 30 mins when healthy
+RATE_LIMIT_BACKOFF_SECONDS = 900  # Back off 15 mins on HTTP 429
+ERROR_BACKOFF_SECONDS = 300       # Back off 5 mins on other fetch errors
+
 
 def load_json_file(filepath, default_value):
     if os.path.exists(filepath):
@@ -29,12 +45,14 @@ def load_json_file(filepath, default_value):
             return default_value
     return default_value
 
+
 def save_json_file(filepath, data):
     try:
         with open(filepath, "w") as f:
             json.dump(data, f, indent=4)
     except Exception as e:
         print(f"Error saving {filepath}: {e}")
+
 
 def send_telegram_message(chat_id, text):
     if not TELEGRAM_BOT_TOKEN:
@@ -44,7 +62,7 @@ def send_telegram_message(chat_id, text):
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown"
+        "parse_mode": "Markdown",
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
@@ -52,6 +70,7 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Error sending message to {chat_id}: {e}")
         return False
+
 
 def broadcast_to_all(text):
     subscribers = load_json_file(SUBSCRIBERS_FILE, [])
@@ -65,9 +84,11 @@ def broadcast_to_all(text):
     for chat_id in target_chats:
         send_telegram_message(chat_id, text)
 
-@app.route("/", methods=["GET"])
+
+@app.route("/", methods=["GET", "HEAD"])
 def home():
     return "Bot is running 24/7!", 200
+
 
 @app.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
@@ -86,7 +107,7 @@ def telegram_webhook():
             if chat_id not in subscribers:
                 subscribers.append(chat_id)
                 save_json_file(SUBSCRIBERS_FILE, subscribers)
-            
+
             welcome_msg = (
                 "🟢 *Bot Status: ONLINE & ACTIVE* 🟢\n\n"
                 "Welcome! The Forex News Alert Bot is up and running 24/7.\n\n"
@@ -98,6 +119,77 @@ def telegram_webhook():
             send_telegram_message(chat_id, welcome_msg)
 
     return jsonify({"status": "ok"}), 200
+
+
+def fetch_calendar_json(url, now_ts):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=12)
+    except Exception as e:
+        print(f"Network error fetching {url}: {e}")
+        CALENDAR_CACHE["next_allowed_fetch_at"] = now_ts + ERROR_BACKOFF_SECONDS
+        return None
+
+    if response.status_code == 429:
+        retry_after = response.headers.get("Retry-After")
+        backoff = RATE_LIMIT_BACKOFF_SECONDS
+        if retry_after and retry_after.isdigit():
+            backoff = max(int(retry_after), 60)
+        CALENDAR_CACHE["next_allowed_fetch_at"] = now_ts + backoff
+        print(f"Rate limited (429) on {url}. Backing off for {backoff}s.")
+        return None
+
+    if response.status_code != 200:
+        print(f"Failed to fetch calendar feed ({url}), status code: {response.status_code}")
+        CALENDAR_CACHE["next_allowed_fetch_at"] = now_ts + ERROR_BACKOFF_SECONDS
+        return None
+
+    try:
+        data = response.json()
+    except Exception as e:
+        print(f"Invalid JSON from {url}: {e}")
+        CALENDAR_CACHE["next_allowed_fetch_at"] = now_ts + ERROR_BACKOFF_SECONDS
+        return None
+
+    if not isinstance(data, list):
+        print(f"Unexpected JSON format from {url} (expected list).")
+        CALENDAR_CACHE["next_allowed_fetch_at"] = now_ts + ERROR_BACKOFF_SECONDS
+        return None
+
+    return data
+
+
+def get_calendar_events(now_ts):
+    if not CALENDAR_CACHE["events"]:
+        disk_events = load_json_file(CACHED_EVENTS_FILE, [])
+        if isinstance(disk_events, list) and disk_events:
+            CALENDAR_CACHE["events"] = disk_events
+
+    last_fetched = CALENDAR_CACHE["last_fetched_at"]
+    cache_fresh = last_fetched is not None and (now_ts - last_fetched) < CACHE_TTL_SECONDS
+
+    if cache_fresh and CALENDAR_CACHE["events"]:
+        return CALENDAR_CACHE["events"]
+
+    if now_ts < CALENDAR_CACHE["next_allowed_fetch_at"]:
+        return CALENDAR_CACHE["events"]
+
+    events = fetch_calendar_json(FF_CALENDAR_URL, now_ts)
+    if not events and FALLBACK_CALENDAR_URL:
+        events = fetch_calendar_json(FALLBACK_CALENDAR_URL, now_ts)
+
+    if events:
+        CALENDAR_CACHE["events"] = events
+        CALENDAR_CACHE["last_fetched_at"] = now_ts
+        CALENDAR_CACHE["next_allowed_fetch_at"] = now_ts + CACHE_TTL_SECONDS
+        save_json_file(CACHED_EVENTS_FILE, events)
+        print(f"Fetched {len(events)} calendar events; next refresh in {CACHE_TTL_SECONDS}s.")
+
+    return CALENDAR_CACHE["events"]
+
 
 def check_spread_reminder(state):
     now_wat = datetime.now(WAT_TZ)
@@ -118,6 +210,7 @@ def check_spread_reminder(state):
             state["spread_dates"] = [d for d in spread_dates if d >= cutoff]
             save_json_file(STATE_FILE, state)
 
+
 def check_sunday_weekly_digest(events, state):
     now_wat = datetime.now(WAT_TZ)
     today_str = now_wat.strftime("%Y-%m-%d")
@@ -135,7 +228,7 @@ def check_sunday_weekly_digest(events, state):
                     country = event.get("country")
                     if not event_iso:
                         continue
-                    
+
                     try:
                         dt = datetime.fromisoformat(event_iso)
                         event_wat = dt.astimezone(WAT_TZ)
@@ -160,18 +253,19 @@ def check_sunday_weekly_digest(events, state):
             state["sunday_digests"] = sunday_digests[-10:]
             save_json_file(STATE_FILE, state)
 
+
 def check_and_alert():
     state = load_json_file(STATE_FILE, {"sent_events": [], "spread_dates": [], "sunday_digests": []})
     check_spread_reminder(state)
 
     now_wat = datetime.now(WAT_TZ)
+    now_ts = time.time()
+
     try:
-        response = requests.get(FF_CALENDAR_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        if response.status_code != 200:
-            print(f"Failed to fetch calendar feed, status code: {response.status_code}")
+        events = get_calendar_events(now_ts)
+        if not events:
             return
-        
-        events = response.json()
+
         check_sunday_weekly_digest(events, state)
 
         ALERT_THRESHOLDS = [60, 30, 15, 5]
@@ -184,21 +278,20 @@ def check_and_alert():
                 country = event.get("country", "USD")
                 if not event_iso:
                     continue
-                
+
                 try:
                     dt = datetime.fromisoformat(event_iso)
                     event_wat = dt.astimezone(WAT_TZ)
                 except Exception as ex:
                     print(f"Error parsing high-impact event date '{event_iso}': {ex}")
                     continue
-                
+
                 minutes_left = (event_wat - now_wat).total_seconds() / 60.0
 
                 for target_min in ALERT_THRESHOLDS:
                     unique_key = f"{country}-{title}-{event_wat.strftime('%Y%m%d%H%M')}-{target_min}m"
-                    
-                    # Window adjusted to capture precisely within a 1.5 minute range of each threshold
-                    if (target_min - 1.0) <= minutes_left <= (target_min + 0.5):
+
+                    if (target_min - 1.5) <= minutes_left <= (target_min + 0.5):
                         if unique_key not in sent_events:
                             time_str = event_wat.strftime("%I:%M %p")
                             msg = (
@@ -218,6 +311,7 @@ def check_and_alert():
         print(f"Error in check_and_alert: {e}")
         traceback.print_exc()
 
+
 def background_polling_loop():
     print("Background polling loop started safely.")
     while True:
@@ -228,9 +322,10 @@ def background_polling_loop():
             traceback.print_exc()
         time.sleep(30)
 
+
 if __name__ == "__main__":
     t = threading.Thread(target=background_polling_loop, daemon=True)
     t.start()
-    
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
